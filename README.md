@@ -29,6 +29,18 @@ You can find the installation script source [here](./scripts/install.sh).
 > [!NOTE]
 > Please refer to the [docs](https://coolify.io/docs/installation) for more information about the installation.
 
+## Staging from this repo
+
+Use `docker-compose.coolify-staging.yml` when you want a repo-built staging instance on a separate VM without touching the primary host naming.
+
+```bash
+cp .env.coolify-staging.example .env.coolify-staging
+docker compose --env-file .env.coolify-staging -f docker-compose.coolify-staging.yml build
+docker compose --env-file .env.coolify-staging -f docker-compose.coolify-staging.yml up -d
+```
+
+This uses staging-specific service, volume, and network names (`coolify-staging-*`) and expects the staging env file to be mounted into the app container.
+
 ## Support
 
 Contact us at [coolify.io/docs/contact](https://coolify.io/docs/contact).
