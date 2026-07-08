@@ -40,3 +40,7 @@ CHANGELOG.md
 /.workspaces
 tests/Browser/Screenshots
 tests/v4/Browser/Screenshots
+
+# BEGIN oh-my-opencode-slim deepwork
+.slim/deepwork/
+# END oh-my-opencode-slim deepwork

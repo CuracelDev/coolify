@@ -134,6 +134,76 @@
                                     <x-forms.input wire:model="base_directory" label="Base Directory"
                                         helper="Directory to use as root. Useful for monorepos." />
                                 @endif
+                                <div class="flex flex-col gap-3 rounded border border-neutral-200 p-4 dark:border-neutral-800">
+                                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                        <div>
+                                            <div class="font-medium">AI-assisted autodetect</div>
+                                            <div class="text-sm text-neutral-500 dark:text-neutral-400">
+                                                Analyze bounded repo facts and optionally prefill the form.
+                                            </div>
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <x-forms.button type="button" wire:click.prevent="analyzeRepository"
+                                                wire:target="analyzeRepository">
+                                                Analyze Repo
+                                                <x-loading-on-button wire:loading.delay wire:target="analyzeRepository" />
+                                            </x-forms.button>
+                                            @if (data_get($analysis_result, 'recommendation.build_pack'))
+                                                <x-forms.button type="button" wire:click.prevent="applyRecommendations"
+                                                    wire:target="applyRecommendations" class="btn btn-primary">
+                                                    Apply Recommendations
+                                                    <x-loading-on-button wire:loading.delay wire:target="applyRecommendations" />
+                                                </x-forms.button>
+                                            @endif
+                                        </div>
+                                    </div>
+                                    @if (data_get($analysis_result, 'recommendation.build_pack'))
+                                        <div class="grid gap-3 md:grid-cols-2">
+                                            <div class="text-sm">
+                                                <div><span class="font-medium">Recommended build pack:</span>
+                                                    {{ data_get($analysis_result, 'recommendation.build_pack') }}</div>
+                                                <div><span class="font-medium">Port:</span>
+                                                    {{ data_get($analysis_result, 'recommendation.port') ?: 'n/a' }}</div>
+                                                <div><span class="font-medium">Base directory:</span>
+                                                    {{ data_get($analysis_result, 'recommendation.base_directory') ?: '/' }}</div>
+                                                <div><span class="font-medium">Publish directory:</span>
+                                                    {{ data_get($analysis_result, 'recommendation.publish_directory') ?: 'n/a' }}</div>
+                                                <div><span class="font-medium">Confidence:</span>
+                                                    {{ number_format((float) data_get($analysis_result, 'recommendation.confidence', 0) * 100, 0) }}%</div>
+                                            </div>
+                                            <div class="text-sm">
+                                                <div><span class="font-medium">AI status:</span>
+                                                    {{ data_get($analysis_result, 'ai.status', 'not-run') }}</div>
+                                                @if (data_get($analysis_result, 'recommendation.rationale'))
+                                                    <div class="pt-1"><span class="font-medium">Why:</span>
+                                                        {{ data_get($analysis_result, 'recommendation.rationale') }}</div>
+                                                @endif
+                                                @if (count(data_get($analysis_result, 'recommendation.caveats', [])) > 0)
+                                                    <div class="pt-1">
+                                                        <div class="font-medium">Caveats:</div>
+                                                        <ul class="list-disc pl-5">
+                                                            @foreach (data_get($analysis_result, 'recommendation.caveats', []) as $caveat)
+                                                                <li>{{ $caveat }}</li>
+                                                            @endforeach
+                                                        </ul>
+                                                    </div>
+                                                @endif
+                                            </div>
+                                        </div>
+                                    @endif
+                                </div>
+                                @if (in_array($build_pack, ['nixpacks', 'railpack', 'static']))
+                                    <div class="grid gap-2 md:grid-cols-2">
+                                        <x-forms.input id="install_command" label="Install Command"
+                                            helper="Optional override for dependency installation." />
+                                        <x-forms.input id="build_command" label="Build Command"
+                                            helper="Optional override for the build step." />
+                                    </div>
+                                    @if ($build_pack !== 'static')
+                                        <x-forms.input id="start_command" label="Start Command"
+                                            helper="Optional override for how the app should start." />
+                                    @endif
+                                @endif
                                 @if ($show_is_static)
                                     <x-forms.input type="number" id="port" label="Port" :readonly="$is_static || $build_pack === 'static'"
                                         helper="The port your application listens on." />
@@ -146,6 +216,8 @@
                             <x-forms.button type="submit">
                                 Continue
                             </x-forms.button>
+                        </form>
+                    </div>
                 @endif
             @endif
         </div>

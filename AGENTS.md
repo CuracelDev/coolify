@@ -2,6 +2,12 @@
 
 For UI/UX design specifications, principles, and visual standards, consult `DESIGN.md` in the [coollabsio/architecture](https://github.com/coollabsio/architecture) repo.
 
+## AI deployment autodetect + MCP
+
+- Coolify now has a shared GitHub repo inspection + AI deployment recommendation flow used by onboarding and MCP.
+- Core inspection/advisor code lives in `app/Services/GithubRepositoryInspectionService.php` and `app/Services/DeploymentAdvisorService.php`.
+- The read-only MCP entrypoint for coding agents is `analyze_repository_deployment_defaults` in `app/Mcp/Tools/AnalyzeRepositoryDeploymentDefaults.php`, exposed via `routes/ai.php` and `app/Mcp/Servers/CoolifyServer.php`.
+
 <laravel-boost-guidelines>
 === foundation rules ===
 

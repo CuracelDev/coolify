@@ -67,4 +67,10 @@ return [
         'base_url' => env('ZITADEL_BASE_URL'),
     ],
 
+    'ai_deploy_advisor' => [
+        'base_url' => env('AI_DEPLOY_ADVISOR_BASE_URL', 'https://llm.crl.to/v1'),
+        'api_key' => env('AI_DEPLOY_ADVISOR_API_KEY'),
+        'model' => env('AI_DEPLOY_ADVISOR_MODEL', 'gpt-5.5'),
+    ],
+
 ];

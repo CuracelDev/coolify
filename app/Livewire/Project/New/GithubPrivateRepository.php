@@ -2,13 +2,17 @@
 
 namespace App\Livewire\Project\New;
 
+use App\Enums\BuildPackTypes;
 use App\Models\Application;
 use App\Models\GithubApp;
 use App\Models\Project;
 use App\Rules\ValidGitBranch;
+use App\Services\DeploymentAdvisorService;
+use App\Services\GithubRepositoryInspectionService;
 use App\Support\ValidationPatterns;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Validation\Rule;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
 
@@ -51,6 +55,12 @@ class GithubPrivateRepository extends Component
 
     public bool $is_static = false;
 
+    public ?string $install_command = null;
+
+    public ?string $build_command = null;
+
+    public ?string $start_command = null;
+
     public ?string $publish_directory = null;
 
     // In case of docker compose
@@ -64,6 +74,10 @@ class GithubPrivateRepository extends Component
     public $build_pack = 'nixpacks';
 
     public bool $show_is_static = true;
+
+    public array $analysis_result = [];
+
+    public array $applied_recommendation = [];
 
     public function mount()
     {
@@ -79,7 +93,18 @@ class GithubPrivateRepository extends Component
 
     public function updatedSelectedRepositoryId(): void
     {
+        $this->resetAnalysis();
         $this->loadBranches();
+    }
+
+    public function updatedSelectedBranchName(): void
+    {
+        $this->resetAnalysis();
+    }
+
+    public function updatedBaseDirectory(): void
+    {
+        $this->resetAnalysis();
     }
 
     public function updatedBuildPack()
@@ -101,6 +126,7 @@ class GithubPrivateRepository extends Component
 
     public function loadRepositories(int $github_app_id): void
     {
+        $this->resetAnalysis();
         $this->repositories = collect();
         $this->branches = collect();
         $this->total_branches_count = 0;
@@ -131,6 +157,7 @@ class GithubPrivateRepository extends Component
 
     public function loadBranches()
     {
+        $this->resetAnalysis();
         $this->selected_repository_owner = $this->repositories->where('id', $this->selected_repository_id)->first()['owner']['login'];
         $this->selected_repository_repo = $this->repositories->where('id', $this->selected_repository_id)->first()['name'];
         $this->branches = collect();
@@ -144,6 +171,113 @@ class GithubPrivateRepository extends Component
         }
         $this->branches = sortBranchesByPriority($this->branches);
         $this->selected_branch_name = data_get($this->branches, '0.name', 'main');
+    }
+
+    public function analyzeRepository(): void
+    {
+        try {
+            $validator = validator([
+                'selected_repository_owner' => $this->selected_repository_owner,
+                'selected_repository_repo' => $this->selected_repository_repo,
+                'selected_branch_name' => $this->selected_branch_name,
+                'base_directory' => $this->base_directory,
+                'port' => $this->port,
+            ], [
+                'selected_repository_owner' => 'required|string|regex:/^[a-zA-Z0-9\-_]+$/',
+                'selected_repository_repo' => 'required|string|regex:/^[a-zA-Z0-9\-_\.]+$/',
+                'selected_branch_name' => ['required', 'string', new ValidGitBranch],
+                'base_directory' => array_merge(['required'], array_slice(ValidationPatterns::directoryPathRules(), 1)),
+                'port' => ['nullable', 'integer', 'between:1,65535'],
+            ]);
+
+            if ($validator->fails()) {
+                throw new \RuntimeException($validator->errors()->first());
+            }
+
+            $inspection = app(GithubRepositoryInspectionService::class)->inspectPrivateRepository(
+                $this->github_app,
+                $this->selected_repository_owner,
+                $this->selected_repository_repo,
+                $this->selected_branch_name,
+                [
+                    'build_pack' => $this->build_pack,
+                    'base_directory' => $this->base_directory,
+                    'port' => $this->port,
+                    'is_static' => $this->is_static,
+                ],
+            );
+            $this->analysis_result = app(DeploymentAdvisorService::class)->recommend($inspection);
+            $this->applied_recommendation = [];
+
+            auditLog('project.application.autodetect.analyzed', [
+                'source' => 'github_private_repository',
+                'github_app_id' => $this->selectedGithubAppId(),
+                'repository' => $this->selectedRepositorySlug(),
+                'branch' => $this->selected_branch_name,
+                'recommended_build_pack' => data_get($this->analysis_result, 'recommendation.build_pack'),
+                'ai_status' => data_get($this->analysis_result, 'ai.status'),
+                'confidence' => data_get($this->analysis_result, 'recommendation.confidence'),
+            ] + $this->analysisAuditMetadata());
+
+            $message = data_get($this->analysis_result, 'ai.status') === 'completed'
+                ? 'Repository analysis completed.'
+                : 'Repository analysis completed with heuristics only.';
+
+            $this->dispatch('success', $message);
+        } catch (\Throwable $e) {
+            $this->analysis_result = [];
+
+            handleError($e, $this);
+        }
+    }
+
+    public function applyRecommendations(): void
+    {
+        $recommendation = data_get($this->analysis_result, 'recommendation', []);
+
+        if ($recommendation === []) {
+            $this->dispatch('error', 'No recommendations available to apply.');
+
+            return;
+        }
+
+        $applied = [];
+
+        if (filled($recommendation['build_pack'] ?? null)) {
+            $this->build_pack = $recommendation['build_pack'];
+            $this->updatedBuildPack();
+            $applied['build_pack'] = $this->build_pack;
+        }
+
+        foreach (['install_command', 'build_command', 'start_command', 'base_directory', 'publish_directory'] as $field) {
+            if (array_key_exists($field, $recommendation)) {
+                $this->{$field} = $recommendation[$field];
+                $applied[$field] = $this->{$field};
+            }
+        }
+
+        if (array_key_exists('port', $recommendation) && filled($recommendation['port'])) {
+            $this->port = (int) $recommendation['port'];
+            $applied['port'] = $this->port;
+        }
+
+        if (($this->build_pack !== BuildPackTypes::STATIC->value) && array_key_exists('is_static', $recommendation)) {
+            $this->is_static = (bool) $recommendation['is_static'];
+            $applied['is_static'] = $this->is_static;
+        }
+
+        $this->applied_recommendation = $applied;
+
+        auditLog('project.application.autodetect.applied', [
+            'source' => 'github_private_repository',
+            'github_app_id' => $this->selectedGithubAppId(),
+            'repository' => $this->selectedRepositorySlug(),
+            'branch' => $this->selected_branch_name,
+            'applied' => $this->applied_recommendation,
+            'recommended_build_pack' => data_get($this->analysis_result, 'recommendation.build_pack'),
+        ] + $this->analysisAuditMetadata());
+
+        $this->dispatch('success', 'Recommendations applied to the form.');
     }
 
     protected function loadBranchByPage()
@@ -175,11 +309,25 @@ class GithubPrivateRepository extends Component
                 'selected_repository_repo' => $this->selected_repository_repo,
                 'selected_branch_name' => $this->selected_branch_name,
                 'docker_compose_location' => $this->docker_compose_location,
+                'build_pack' => $this->build_pack,
+                'base_directory' => $this->base_directory,
+                'publish_directory' => $this->publish_directory,
+                'install_command' => $this->install_command,
+                'build_command' => $this->build_command,
+                'start_command' => $this->start_command,
+                'port' => $this->port,
             ], [
                 'selected_repository_owner' => 'required|string|regex:/^[a-zA-Z0-9\-_]+$/',
                 'selected_repository_repo' => 'required|string|regex:/^[a-zA-Z0-9\-_\.]+$/',
                 'selected_branch_name' => ['required', 'string', new ValidGitBranch],
                 'docker_compose_location' => ValidationPatterns::filePathRules(),
+                'build_pack' => ['required', 'string', Rule::in(collect(BuildPackTypes::cases())->map->value->all())],
+                'base_directory' => array_merge(['required'], array_slice(ValidationPatterns::directoryPathRules(), 1)),
+                'publish_directory' => ValidationPatterns::directoryPathRules(),
+                'install_command' => ValidationPatterns::shellSafeCommandRules(),
+                'build_command' => ValidationPatterns::shellSafeCommandRules(),
+                'start_command' => ValidationPatterns::shellSafeCommandRules(),
+                'port' => ['required', 'integer', 'between:1,65535'],
             ]);
 
             if ($validator->fails()) {
@@ -202,6 +350,9 @@ class GithubPrivateRepository extends Component
                 'git_repository' => str($this->selected_repository_owner)->trim()->toString().'/'.str($this->selected_repository_repo)->trim()->toString(),
                 'git_branch' => str($this->selected_branch_name)->trim()->toString(),
                 'build_pack' => $this->build_pack,
+                'install_command' => $this->install_command,
+                'build_command' => $this->build_command,
+                'start_command' => $this->start_command,
                 'ports_exposes' => $this->port,
                 'publish_directory' => $this->publish_directory,
                 'base_directory' => $this->base_directory,
@@ -226,6 +377,18 @@ class GithubPrivateRepository extends Component
             $application->name = generate_application_name($this->selected_repository_owner.'/'.$this->selected_repository_repo, $this->selected_branch_name, $application->uuid);
             $application->save();
 
+            if ($this->analysis_result !== []) {
+                auditLog('project.application.autodetect.saved', [
+                    'source' => 'github_private_repository',
+                    'application_id' => $application->id,
+                    'repository' => $this->selectedRepositorySlug(),
+                    'branch' => $this->selected_branch_name,
+                    'recommended' => $this->compactRecommendationForAudit(data_get($this->analysis_result, 'recommendation', [])),
+                    'applied' => $this->compactRecommendationForAudit($this->applied_recommendation),
+                    'ai_status' => data_get($this->analysis_result, 'ai.status'),
+                ] + $this->analysisAuditMetadata());
+            }
+
             return redirect()->route('project.application.configuration', [
                 'application_uuid' => $application->uuid,
                 'environment_uuid' => $environment->uuid,
@@ -246,5 +409,64 @@ class GithubPrivateRepository extends Component
             $this->publish_directory = null;
         }
         $this->dispatch('success', 'Application settings updated!');
+    }
+
+    private function resetAnalysis(): void
+    {
+        $this->analysis_result = [];
+        $this->applied_recommendation = [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $recommendation
+     * @return array<string, mixed>
+     */
+    private function compactRecommendationForAudit(array $recommendation): array
+    {
+        return collect($recommendation)
+            ->only([
+                'build_pack',
+                'install_command',
+                'build_command',
+                'start_command',
+                'port',
+                'base_directory',
+                'publish_directory',
+                'is_static',
+                'confidence',
+                'rationale',
+                'caveats',
+                'source',
+            ])
+            ->all();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function analysisAuditMetadata(): array
+    {
+        return collect(data_get($this->analysis_result, 'audit', []))
+            ->only([
+                'inspection_fingerprint',
+                'model',
+                'rationale',
+                'caveats',
+            ])
+            ->all();
+    }
+
+    private function selectedRepositorySlug(): ?string
+    {
+        if (! isset($this->selected_repository_owner, $this->selected_repository_repo)) {
+            return null;
+        }
+
+        return $this->selected_repository_owner.'/'.$this->selected_repository_repo;
+    }
+
+    private function selectedGithubAppId(): ?int
+    {
+        return isset($this->github_app) ? $this->github_app->id : null;
     }
 }

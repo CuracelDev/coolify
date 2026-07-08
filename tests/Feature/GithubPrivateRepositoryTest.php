@@ -275,4 +275,18 @@ describe('GitHub Private Repository Component', function () {
         Livewire::test(GithubPrivateRepository::class, ['type' => 'private-gh-app'])
             ->assertDontSee('Refresh Repository List');
     });
+
+    test('submit rejects invalid port values before creating the application', function () {
+        Livewire::test(GithubPrivateRepository::class, ['type' => 'private-gh-app'])
+            ->set('selected_repository_owner', 'testuser')
+            ->set('selected_repository_repo', 'demo-app')
+            ->set('selected_branch_name', 'main')
+            ->set('build_pack', 'nixpacks')
+            ->set('base_directory', '/')
+            ->set('port', 70000)
+            ->call('submit')
+            ->assertDispatched('error', function ($event, $message) {
+                return str_contains((string) $message, 'port');
+            });
+    });
 });

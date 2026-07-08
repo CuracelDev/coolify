@@ -1,11 +1,14 @@
 <?php
 
+use App\Models\GithubApp;
 use App\Models\InstanceSettings;
+use App\Models\PrivateKey;
 use App\Models\Project;
 use App\Models\Server;
 use App\Models\Team;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Once;
 
 uses(RefreshDatabase::class);
@@ -64,6 +67,85 @@ function mcpToolJson($response): array
     return json_decode($response->json('result.content.0.text'), true);
 }
 
+function mcpGithubAppForTeam(Team $team, int $installationId = 67890, bool $isSystemWide = false): GithubApp
+{
+    $rsaKey = openssl_pkey_new([
+        'private_key_bits' => 2048,
+        'private_key_type' => OPENSSL_KEYTYPE_RSA,
+    ]);
+    openssl_pkey_export($rsaKey, $pemKey);
+
+    $privateKey = PrivateKey::create([
+        'name' => 'MCP Test Key '.$team->id,
+        'private_key' => $pemKey,
+        'team_id' => $team->id,
+    ]);
+
+    return GithubApp::create([
+        'name' => 'MCP GitHub App '.$team->id,
+        'api_url' => 'https://api.github.com',
+        'html_url' => 'https://github.com',
+        'custom_user' => 'git',
+        'custom_port' => 22,
+        'app_id' => 12345,
+        'installation_id' => $installationId,
+        'client_id' => 'mcp-client-id',
+        'client_secret' => 'mcp-client-secret',
+        'webhook_secret' => 'mcp-webhook-secret',
+        'private_key_id' => $privateKey->id,
+        'team_id' => $team->id,
+        'is_public' => false,
+        'is_system_wide' => $isSystemWide,
+    ]);
+}
+
+function fakeGithubInspectionResponses(int $installationId, array $fileMap, array $rootEntries): void
+{
+    Http::fake(function ($request) use ($installationId, $fileMap, $rootEntries) {
+        $url = $request->url();
+
+        if ($url === 'https://api.github.com/zen') {
+            return Http::response('Keep it logically awesome.', 200, [
+                'Date' => now()->toRfc7231String(),
+            ]);
+        }
+
+        if ($url === "https://api.github.com/app/installations/{$installationId}/access_tokens") {
+            return Http::response(['token' => 'mcp-installation-token'], 201);
+        }
+
+        if ($url === 'https://llm.crl.to/v1/chat/completions') {
+            return Http::response([
+                'choices' => [[
+                    'message' => [
+                        'content' => json_encode([
+                            'build_pack' => 'static',
+                            'install_command' => 'npm ci',
+                            'build_command' => 'npm run build',
+                            'publish_directory' => '/dist',
+                            'port' => 80,
+                            'confidence' => 0.94,
+                            'rationale' => 'Frontend repo facts strongly indicate a static deployment.',
+                            'caveats' => ['Confirm SPA routing fallback after deploy.'],
+                        ]),
+                    ],
+                ]],
+            ]);
+        }
+
+        if ($url === 'https://api.github.com/repos/acme/web/contents?ref=main') {
+            return Http::response($rootEntries, 200);
+        }
+
+        $path = str($url)->after('https://api.github.com/repos/acme/web/contents')->before('?ref=main')->value();
+        if (array_key_exists($path, $fileMap)) {
+            return Http::response($fileMap[$path], 200);
+        }
+
+        return Http::response(['message' => 'Not Found'], 404);
+    });
+}
+
 test('MCP endpoint returns 404 when the instance setting is disabled', function () {
     InstanceSettings::query()->where('id', 0)->update(['is_mcp_server_enabled' => false]);
     Once::flush();
@@ -86,6 +168,7 @@ test('MCP endpoint lists tools for an authenticated token', function () {
     $toolNames = collect($response->json('result.tools'))->pluck('name')->all();
     expect($toolNames)->toContain(
         'get_infrastructure_overview',
+        'analyze_repository_deployment_defaults',
         'list_servers',
         'get_server',
         'list_projects',
@@ -191,6 +274,121 @@ test('tool calls fail when the token lacks the read ability', function () {
 
     expect($response->json('result.isError'))->toBeTrue();
     expect($response->json('result.content.0.text'))->toContain('Missing required permissions');
+});
+
+test('analyze_repository_deployment_defaults returns structured recommendations without raw file bodies', function () {
+    config()->set('services.ai_deploy_advisor.api_key', 'test-token');
+
+    $githubApp = mcpGithubAppForTeam($this->team);
+
+    fakeGithubInspectionResponses(
+        installationId: $githubApp->installation_id,
+        rootEntries: [
+            ['path' => 'package.json', 'type' => 'file', 'name' => 'package.json'],
+            ['path' => 'README.md', 'type' => 'file', 'name' => 'README.md'],
+            ['path' => 'vite.config.ts', 'type' => 'file', 'name' => 'vite.config.ts'],
+        ],
+        fileMap: [
+            '/package.json' => [
+                'type' => 'file',
+                'name' => 'package.json',
+                'path' => 'package.json',
+                'size' => 140,
+                'sha' => 'pkg-sha',
+                'encoding' => 'base64',
+                'content' => base64_encode(json_encode([
+                    'name' => 'web-ui',
+                    'scripts' => ['build' => 'vite build'],
+                    'dependencies' => ['react' => '^19.0.0'],
+                    'devDependencies' => ['vite' => '^6.0.0'],
+                ])),
+            ],
+            '/README.md' => [
+                'type' => 'file',
+                'name' => 'README.md',
+                'path' => 'README.md',
+                'size' => 90,
+                'sha' => 'readme-sha',
+                'encoding' => 'base64',
+                'content' => base64_encode('Very detailed README body that should not be mirrored back to MCP clients.'),
+            ],
+            '/vite.config.ts' => [
+                'type' => 'file',
+                'name' => 'vite.config.ts',
+                'path' => 'vite.config.ts',
+                'size' => 40,
+                'sha' => 'vite-sha',
+                'encoding' => 'base64',
+                'content' => base64_encode('import { defineConfig } from "vite";'),
+            ],
+        ],
+    );
+
+    $token = $this->user->createToken('mcp-read', ['read'])->plainTextToken;
+
+    $response = mcpCallTool($token, 'analyze_repository_deployment_defaults', [
+        'github_app_uuid' => $githubApp->uuid,
+        'repo_owner' => 'acme',
+        'repo_name' => 'web',
+        'branch' => 'main',
+    ]);
+    $response->assertOk();
+
+    $body = mcpToolJson($response);
+    $raw = json_encode($body);
+
+    expect($body['data'])->toHaveKeys(['source', 'repository', 'selection', 'inspection', 'recommendation', 'heuristics', 'ai', 'rationale']);
+    expect($body['data']['inspection'])->toHaveKeys(['fingerprint', 'package_manager', 'lockfiles', 'directory_entries', 'files']);
+    expect($body['data']['recommendation']['build_pack'])->toBe('static');
+    expect($body['data']['ai']['status'])->toBe('completed');
+    expect($raw)->not->toContain('Very detailed README body');
+    expect($raw)->not->toContain('"content"');
+});
+
+test('analyze_repository_deployment_defaults fails clearly when base directory is missing', function () {
+    $githubApp = mcpGithubAppForTeam($this->team, installationId: 67891);
+
+    Http::fake([
+        'https://api.github.com/zen' => Http::response('Keep it logically awesome.', 200, [
+            'Date' => now()->toRfc7231String(),
+        ]),
+        'https://api.github.com/app/installations/67891/access_tokens' => Http::response(['token' => 'mcp-installation-token'], 201),
+        'https://api.github.com/repos/acme/web/contents/apps/missing?ref=main' => Http::response(['message' => 'Not Found'], 404),
+    ]);
+
+    $token = $this->user->createToken('mcp-read', ['read'])->plainTextToken;
+
+    $response = mcpCallTool($token, 'analyze_repository_deployment_defaults', [
+        'github_app_uuid' => $githubApp->uuid,
+        'repo_owner' => 'acme',
+        'repo_name' => 'web',
+        'branch' => 'main',
+        'base_directory' => '/apps/missing',
+    ]);
+
+    $response->assertOk();
+    expect($response->json('result.isError'))->toBeTrue();
+    expect($response->json('result.content.0.text'))->toContain('Selected base directory');
+});
+
+test('analyze_repository_deployment_defaults enforces team scoped github sources', function () {
+    $otherTeam = Team::factory()->create();
+    $otherGithubApp = mcpGithubAppForTeam($otherTeam, installationId: 67892);
+
+    Http::fake();
+    $token = $this->user->createToken('mcp-read', ['read'])->plainTextToken;
+
+    $response = mcpCallTool($token, 'analyze_repository_deployment_defaults', [
+        'github_app_uuid' => $otherGithubApp->uuid,
+        'repo_owner' => 'acme',
+        'repo_name' => 'web',
+        'branch' => 'main',
+    ]);
+
+    $response->assertOk();
+    expect($response->json('result.isError'))->toBeTrue();
+    expect($response->json('result.content.0.text'))->toContain('GitHub source not found');
+    Http::assertNothingSent();
 });
 
 test('MCP rejects token when user no longer belongs to token team', function () {
