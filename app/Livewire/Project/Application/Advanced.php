@@ -182,7 +182,7 @@ class Advanced extends Component
     }
 
     /**
-     * @return array{supported: bool, reason: string, expected_url: string|null}
+     * @return array{supported: bool, reason: string, expected_url: string|null, mode: string}
      */
     #[Computed]
     public function deploymentOperatorSupport(): array
@@ -192,28 +192,20 @@ class Advanced extends Component
         $buildPack = (string) $this->application->build_pack;
 
         if ($buildPack === BuildPackTypes::DOCKERCOMPOSE->value) {
-            return ['supported' => false, 'reason' => 'Docker Compose apps are not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+            return ['supported' => false, 'reason' => 'Docker Compose apps are not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl, 'mode' => 'unsupported'];
         }
 
-        if ($buildPack === BuildPackTypes::RAILPACK->value) {
-            return ['supported' => false, 'reason' => 'Railpack apps are not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
-        }
-
-        if ($buildPack === BuildPackTypes::STATIC->value) {
-            return ['supported' => false, 'reason' => 'Standalone static apps are not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
-        }
-
-        if (! in_array($buildPack, [BuildPackTypes::NIXPACKS->value, BuildPackTypes::DOCKERFILE->value], true)) {
-            return ['supported' => false, 'reason' => 'This deployment mode is not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+        if (! in_array($buildPack, [BuildPackTypes::NIXPACKS->value, BuildPackTypes::DOCKERFILE->value, BuildPackTypes::STATIC->value, BuildPackTypes::RAILPACK->value], true)) {
+            return ['supported' => false, 'reason' => 'This deployment mode is not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl, 'mode' => 'unsupported'];
         }
 
         if ($this->application->additional_servers()->count() > 0) {
-            return ['supported' => false, 'reason' => 'Apps with additional destinations are not supported for operator mode yet.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+            return ['supported' => false, 'reason' => 'Apps with additional destinations are not supported for operator mode yet.', 'expected_url' => $this->deploymentOperatorExpectedUrl, 'mode' => 'unsupported'];
         }
 
         $expectedUrl = $this->deploymentOperatorExpectedUrl;
         if (blank($expectedUrl)) {
-            return ['supported' => false, 'reason' => 'No generated Coolify URL is available for this app.', 'expected_url' => null];
+            return ['supported' => false, 'reason' => 'No generated Coolify URL is available for this app.', 'expected_url' => null, 'mode' => 'unsupported'];
         }
 
         $configuredDomains = collect($this->application->fqdns)
@@ -232,7 +224,12 @@ class Advanced extends Component
                 'supported' => false,
                 'reason' => 'Add the generated Coolify URL to Domains to enable operator mode verification.',
                 'expected_url' => $expectedUrl,
+                'mode' => 'unsupported',
             ];
+        }
+
+        if (in_array($buildPack, [BuildPackTypes::STATIC->value, BuildPackTypes::RAILPACK->value], true)) {
+            return ['supported' => true, 'reason' => 'supported', 'expected_url' => $expectedUrl, 'mode' => 'verify_only'];
         }
 
         if ($buildPack === BuildPackTypes::NIXPACKS->value) {
@@ -241,10 +238,11 @@ class Advanced extends Component
                     'supported' => false,
                     'reason' => 'Static Nixpacks apps need a publish directory to be set.',
                     'expected_url' => $expectedUrl,
+                    'mode' => 'unsupported',
                 ];
             }
 
-            return ['supported' => true, 'reason' => 'supported', 'expected_url' => $expectedUrl];
+            return ['supported' => true, 'reason' => 'supported', 'expected_url' => $expectedUrl, 'mode' => 'full'];
         }
 
         if ($buildPack === BuildPackTypes::DOCKERFILE->value) {
@@ -253,6 +251,7 @@ class Advanced extends Component
                     'supported' => false,
                     'reason' => 'Static Dockerfile apps are not supported for operator mode.',
                     'expected_url' => $expectedUrl,
+                    'mode' => 'unsupported',
                 ];
             }
 
@@ -261,13 +260,14 @@ class Advanced extends Component
                     'supported' => false,
                     'reason' => 'Inline Dockerfile is not supported for operator mode. Use a Dockerfile in your repository.',
                     'expected_url' => $expectedUrl,
+                    'mode' => 'unsupported',
                 ];
             }
 
-            return ['supported' => true, 'reason' => 'supported', 'expected_url' => $expectedUrl];
+            return ['supported' => true, 'reason' => 'supported', 'expected_url' => $expectedUrl, 'mode' => 'full'];
         }
 
-        return ['supported' => false, 'reason' => 'This app is not supported for operator mode.', 'expected_url' => $expectedUrl];
+        return ['supported' => false, 'reason' => 'This app is not supported for operator mode.', 'expected_url' => $expectedUrl, 'mode' => 'unsupported'];
     }
 
     private function normalizeRouteUrl(string $url): string

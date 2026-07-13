@@ -62,7 +62,11 @@
                     <div class="mt-2">
                         @if ($this->deploymentOperatorSupport['supported'])
                             <x-callout type="success" title="Supported for this app">
-                                Operator mode is available for this app.
+                                @if ($this->deploymentOperatorSupport['mode'] === 'verify_only')
+                                    Operator mode is available for this app in verify-only mode. Coolify will verify the generated default URL after finished deployments, but it will not apply fixes or queue retries.
+                                @else
+                                    Operator mode is available for this app.
+                                @endif
                             </x-callout>
                         @else
                             <x-callout type="warning" title="Not supported for this app">
@@ -79,9 +83,9 @@
 
                     <div class="mt-3 grid gap-1 text-xs text-neutral-600 dark:text-neutral-400">
                         <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Default route:</span> checks the generated Coolify URL after deployment.</div>
-                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Safe fixes:</span> may apply one safe remediation and retry once (two total attempts max).</div>
-                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Supported now:</span> Nixpacks, Nixpacks static apps, Dockerfile (limited).</div>
-                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Not supported yet:</span> Docker Compose, Railpack, standalone static, and other custom deployment modes.</div>
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Safe fixes:</span> may apply one safe remediation and retry once (two total attempts max). Standalone static and Railpack stay verify-only.</div>
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Supported now:</span> Nixpacks, Nixpacks static apps, Dockerfile (limited), standalone static (verify-only), Railpack (verify-only).</div>
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Not supported yet:</span> Docker Compose, previews, additional destinations, and other custom deployment modes.</div>
                         <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Custom domains:</span> checked separately after the default route passes (observe-only).</div>
                     </div>
                 </div>

@@ -62,3 +62,34 @@ it('shows a clear not supported state when the generated Coolify URL is not conf
         ->assertSee('Not supported for this app')
         ->assertSee('Add the generated Coolify URL to Domains');
 });
+
+it('shows standalone static apps as supported in verify-only mode', function () {
+    [$application, $server] = createApplicationForAdvancedDeploymentOperatorTest([
+        'build_pack' => 'static',
+    ]);
+
+    $application->update([
+        'fqdn' => generateUrl($server, $application->uuid),
+    ]);
+
+    Livewire::test(Advanced::class, ['application' => $application->fresh()])
+        ->assertSee('Supported for this app')
+        ->assertSee('verify-only mode')
+        ->assertSee('standalone static (verify-only)');
+});
+
+it('shows railpack apps as supported in verify-only mode', function () {
+    [$application, $server] = createApplicationForAdvancedDeploymentOperatorTest([
+        'build_pack' => 'railpack',
+    ]);
+
+    $application->update([
+        'fqdn' => generateUrl($server, $application->uuid),
+    ]);
+
+    Livewire::test(Advanced::class, ['application' => $application->fresh()])
+        ->assertSee('Supported for this app')
+        ->assertSee('verify-only mode')
+        ->assertSee('Railpack (verify-only)')
+        ->assertDontSee('Railpack apps are not supported for operator mode.');
+});

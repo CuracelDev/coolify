@@ -19,15 +19,21 @@ It is intentionally narrow and rule-based.
 - Nixpacks applications
 - Nixpacks static apps (`is_static` + `publish_directory`)
 - Dockerfile applications in constrained mode
+- Standalone static build-pack applications in verify-only mode
+- Railpack applications in verify-only mode
+- Preview deployments in record-only / verify-only mode
+- Constrained Docker Compose applications in verify-only mode
+- Multi-destination applications in primary-canary verify-only mode
 
 ## Not supported yet
 
-- Docker Compose
-- Railpack
-- Standalone `static` build pack mode
-- Preview deployments
-- Multi-destination / additional-server rollouts
 - Automatic custom-domain fixes
+- Docker Compose remediation / retry
+- Railpack remediation / retry
+- Standalone static remediation / retry
+- Preview remediation / retry
+- Automatic rollout fanout for multi-destination apps
+- Verification of non-primary destination rows in multi-destination apps
 
 ## What it verifies
 
@@ -45,6 +51,16 @@ If the default URL passes, custom domains are checked separately in **observe-on
 - Custom-domain results do **not** override deployment success.
 - Custom-domain results are recorded as `passed`, `pending`, or `failed`.
 
+### Verify-only slices
+
+These paths currently use verification only and do not remediate automatically:
+
+- standalone static build-pack apps
+- Railpack apps
+- preview deployments
+- constrained Docker Compose apps
+- multi-destination canary rows
+
 ## Current remediation rules
 
 ### Nixpacks / Tailwind / Node mismatch
@@ -53,6 +69,14 @@ If a Nixpacks deployment fails with a known Node / native-binding signature (for
 
 - set `NIXPACKS_NODE_VERSION=22`
 - queue one forced rebuild retry
+
+No remediation is currently performed for:
+
+- standalone static build-pack apps
+- Railpack apps
+- preview deployments
+- Docker Compose apps
+- multi-destination canary rows
 
 ## Attempt limits
 
@@ -117,6 +141,6 @@ Use this order:
 ## Current limitations
 
 - Custom-domain checks are observe-only.
-- Compose / Railpack remain out of scope.
+- Compose, Railpack, static, preview, and multi-destination support are still intentionally narrow and mostly verify-only.
 - The operator is not a generic self-healing engine.
 - New remediation rules should only be added when they are deterministic and low-risk.
