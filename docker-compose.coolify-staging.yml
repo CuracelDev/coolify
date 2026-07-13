@@ -11,6 +11,7 @@ services:
       - host.docker.internal:host-gateway
     networks:
       - coolify-staging
+      - coolify
     env_file:
       - ./.env.coolify-staging
     environment:
@@ -39,6 +40,23 @@ services:
       interval: 5s
       retries: 10
       timeout: 2s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.middlewares.coolify-staging-gzip.compress=true
+      - traefik.http.middlewares.coolify-staging-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.http-coolify-staging.entryPoints=http
+      - traefik.http.routers.http-coolify-staging.rule=Host(`stagapps.crl.to`) && PathPrefix(`/`)
+      - traefik.http.routers.http-coolify-staging.middlewares=coolify-staging-redirect
+      - traefik.http.routers.http-coolify-staging.service=http-coolify-staging
+      - traefik.http.routers.https-coolify-staging.entryPoints=https
+      - traefik.http.routers.https-coolify-staging.rule=Host(`stagapps.crl.to`) && PathPrefix(`/`)
+      - traefik.http.routers.https-coolify-staging.middlewares=coolify-staging-gzip
+      - traefik.http.routers.https-coolify-staging.service=https-coolify-staging
+      - traefik.http.routers.https-coolify-staging.tls=true
+      - traefik.http.routers.https-coolify-staging.tls.certresolver=letsencrypt
+      - traefik.http.services.http-coolify-staging.loadbalancer.server.port=8080
+      - traefik.http.services.https-coolify-staging.loadbalancer.server.port=8080
     depends_on:
       coolify-staging-db:
         condition: service_healthy
@@ -138,3 +156,5 @@ networks:
     name: coolify-staging
     driver: bridge
     external: false
+  coolify:
+    external: true

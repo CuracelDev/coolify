@@ -538,6 +538,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
             \Log::warning('Post deployment command failed for '.$this->deployment_uuid.': '.$e->getMessage());
         }
 
+        ApplicationDeploymentVerificationJob::dispatch($this->application_deployment_queue->id);
+
     }
 
     private function deploy_simple_dockerfile()
@@ -4890,5 +4892,7 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
                 }
             }
         }
+
+        ApplicationDeploymentVerificationJob::dispatch($this->application_deployment_queue->id);
     }
 }

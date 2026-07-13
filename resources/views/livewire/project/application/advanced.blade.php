@@ -45,6 +45,47 @@
                     instantSave id="isPrDeploymentsPublicEnabled" label="Allow Public PR Deployments" canGate="update"
                     :canResource="$application" :disabled="!$isPreviewDeploymentsEnabled" />
 
+                <div class="pt-4">
+                    <h4 class="text-sm font-semibold">Deployment Operator (Beta)</h4>
+                    <div class="mt-2">
+                        <x-forms.checkbox
+                            helper="After each deployment, Coolify checks the generated default URL. For supported apps, it can apply one safe fix and retry once."
+                            instantSave
+                            id="isDeploymentOperatorEnabled"
+                            label="Enable operator mode"
+                            canGate="update"
+                            :canResource="$application"
+                            :disabled="!$this->deploymentOperatorSupport['supported'] && !$isDeploymentOperatorEnabled"
+                        />
+                    </div>
+
+                    <div class="mt-2">
+                        @if ($this->deploymentOperatorSupport['supported'])
+                            <x-callout type="success" title="Supported for this app">
+                                Operator mode is available for this app.
+                            </x-callout>
+                        @else
+                            <x-callout type="warning" title="Not supported for this app">
+                                <div>{{ $this->deploymentOperatorSupport['reason'] }}</div>
+                                @if (! blank($this->deploymentOperatorSupport['expected_url']))
+                                    <div class="mt-2 text-xs">
+                                        <div class="font-semibold">Generated Coolify URL</div>
+                                        <div class="font-mono break-all">{{ $this->deploymentOperatorSupport['expected_url'] }}</div>
+                                    </div>
+                                @endif
+                            </x-callout>
+                        @endif
+                    </div>
+
+                    <div class="mt-3 grid gap-1 text-xs text-neutral-600 dark:text-neutral-400">
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Default route:</span> checks the generated Coolify URL after deployment.</div>
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Safe fixes:</span> may apply one safe remediation and retry once (two total attempts max).</div>
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Supported now:</span> Nixpacks, Nixpacks static apps, Dockerfile (limited).</div>
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Not supported yet:</span> Docker Compose, Railpack, standalone static, and other custom deployment modes.</div>
+                        <div><span class="font-semibold text-neutral-800 dark:text-neutral-200">Custom domains:</span> checked separately after the default route passes (observe-only).</div>
+                    </div>
+                </div>
+
                 <h3 class="pt-4">Git</h3>
                 <x-forms.checkbox instantSave id="isGitSubmodulesEnabled" label="Submodules"
                     helper="Allow Git Submodules during build process." canGate="update" :canResource="$application" />

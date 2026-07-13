@@ -128,16 +128,16 @@ class DeploymentAdvisorService
             $caveats[] = 'If this is an SPA, make sure routing fallback behavior is configured after deploy.';
 
             return $this->normalizeRecommendation([
-                'build_pack' => BuildPackTypes::STATIC->value,
+                'build_pack' => BuildPackTypes::NIXPACKS->value,
                 'install_command' => $this->defaultInstallCommand($packageManager, $inspection),
                 'build_command' => $buildScript ? $this->scriptCommand($packageManager, 'build') : null,
                 'start_command' => null,
                 'port' => 80,
                 'base_directory' => data_get($selection, 'base_directory', '/'),
                 'publish_directory' => '/dist',
-                'is_static' => false,
-                'confidence' => 0.92,
-                'rationale' => 'Detected a Vite-style frontend build, so static deployment with a dist publish directory is the safest default.',
+                'is_static' => true,
+                'confidence' => 0.7,
+                'rationale' => 'Detected a Vite-style frontend build, so a Nixpacks build with a dist publish directory is the safest default for building first and serving static assets after.',
                 'caveats' => $caveats,
                 'source' => 'heuristics',
             ], $inspection);

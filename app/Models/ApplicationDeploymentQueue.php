@@ -72,6 +72,11 @@ class ApplicationDeploymentQueue extends Model
         'build_server_id',
         'horizon_job_id',
         'horizon_job_worker',
+        'operator_attempt',
+        'operator_root_deployment_id',
+        'operator_status',
+        'operator_rule',
+        'operator_verification',
         'finished_at',
     ];
 
@@ -90,6 +95,9 @@ class ApplicationDeploymentQueue extends Model
 
     protected $casts = [
         'pull_request_id' => 'integer',
+        'operator_attempt' => 'integer',
+        'operator_root_deployment_id' => 'integer',
+        'operator_verification' => 'array',
         'finished_at' => 'datetime',
         'configuration_snapshot' => EncryptedArrayCast::class,
         'configuration_diff' => EncryptedArrayCast::class,

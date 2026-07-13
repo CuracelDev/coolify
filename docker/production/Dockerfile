@@ -9,7 +9,8 @@ ARG CLOUDFLARED_VERSION=2025.7.0
 # Note: We are using version 18 of the postgres client (while still using postgres 15 for the postgres server) as version 15 has been removed from Alpine 3.23+ https://pkgs.alpinelinux.org/packages?name=postgresql*-client&branch=v3.23&repo=&arch=x86_64&origin=&flagged=&maintainer=
 ARG POSTGRES_VERSION=18
 # https://nginx.org/en/linux_packages.html
-ARG NGINX_VERSION=1.31.0-r1
+# Leave empty to install the latest compatible nginx package from nginx.org for the current Alpine base.
+ARG NGINX_VERSION=
 
 # Add user/group
 ARG USER_ID=9999
@@ -31,7 +32,11 @@ RUN set -eux; \
     sed -i 's|http://nginx.org/packages|https://nginx.org/packages|g' /etc/apk/repositories; \
     grep -qxF "@nginx ${NGINX_REPOSITORY}" /etc/apk/repositories || echo "@nginx ${NGINX_REPOSITORY}" >> /etc/apk/repositories; \
     curl -fsSL https://nginx.org/keys/nginx_signing.rsa.pub -o /etc/apk/keys/nginx_signing.rsa.pub; \
-    apk add --no-cache --upgrade "nginx@nginx=${NGINX_VERSION}"; \
+    if [ -n "${NGINX_VERSION}" ]; then \
+        apk add --no-cache --upgrade "nginx@nginx=${NGINX_VERSION}"; \
+    else \
+        apk add --no-cache --upgrade nginx@nginx; \
+    fi; \
     rm -f /etc/nginx/nginx.conf /etc/nginx/conf.d/default.conf; \
     nginx -v
 
@@ -90,7 +95,11 @@ RUN set -eux; \
     sed -i 's|http://nginx.org/packages|https://nginx.org/packages|g' /etc/apk/repositories; \
     grep -qxF "@nginx ${NGINX_REPOSITORY}" /etc/apk/repositories || echo "@nginx ${NGINX_REPOSITORY}" >> /etc/apk/repositories; \
     curl -fsSL https://nginx.org/keys/nginx_signing.rsa.pub -o /etc/apk/keys/nginx_signing.rsa.pub; \
-    apk add --no-cache --upgrade "nginx@nginx=${NGINX_VERSION}"; \
+    if [ -n "${NGINX_VERSION}" ]; then \
+        apk add --no-cache --upgrade "nginx@nginx=${NGINX_VERSION}"; \
+    else \
+        apk add --no-cache --upgrade nginx@nginx; \
+    fi; \
     rm -f /etc/nginx/nginx.conf /etc/nginx/conf.d/default.conf; \
     nginx -v
 

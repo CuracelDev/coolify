@@ -2,12 +2,15 @@
 
 namespace App\Livewire\Project\Application;
 
+use App\Enums\BuildPackTypes;
 use App\Models\Application;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
+use Livewire\Attributes\Computed;
 use Livewire\Attributes\Validate;
 use Livewire\Component;
+use Spatie\Url\Url;
 
 class Advanced extends Component
 {
@@ -35,6 +38,9 @@ class Advanced extends Component
 
     #[Validate(['boolean'])]
     public bool $isAutoDeployEnabled = true;
+
+    #[Validate(['boolean'])]
+    public bool $isDeploymentOperatorEnabled = false;
 
     #[Validate(['boolean'])]
     public bool $disableBuildCache = false;
@@ -110,6 +116,7 @@ class Advanced extends Component
             $this->application->settings->is_preview_deployments_enabled = $this->isPreviewDeploymentsEnabled;
             $this->application->settings->is_pr_deployments_public_enabled = $this->isPrDeploymentsPublicEnabled;
             $this->application->settings->is_auto_deploy_enabled = $this->isAutoDeployEnabled;
+            $this->application->settings->is_deployment_operator_enabled = $this->isDeploymentOperatorEnabled;
             $this->application->settings->is_log_drain_enabled = $this->isLogDrainEnabled;
             $this->application->settings->is_gpu_enabled = $this->isGpuEnabled;
             $this->application->settings->gpu_driver = $this->gpuDriver;
@@ -139,6 +146,7 @@ class Advanced extends Component
             $this->isPreviewDeploymentsEnabled = $this->application->settings->is_preview_deployments_enabled;
             $this->isPrDeploymentsPublicEnabled = $this->application->settings->is_pr_deployments_public_enabled ?? false;
             $this->isAutoDeployEnabled = $this->application->settings->is_auto_deploy_enabled;
+            $this->isDeploymentOperatorEnabled = $this->application->settings->is_deployment_operator_enabled ?? false;
             $this->isGpuEnabled = $this->application->settings->is_gpu_enabled;
             $this->gpuDriver = $this->application->settings->gpu_driver;
             $this->gpuCount = $this->application->settings->gpu_count;
@@ -158,6 +166,123 @@ class Advanced extends Component
         // Load stop_grace_period separately since it has its own save handler
         // Convert null to empty string to prevent dirty detection issues
         $this->stopGracePeriod = $this->application->settings->stop_grace_period ?? '';
+    }
+
+    #[Computed]
+    public function deploymentOperatorExpectedUrl(): ?string
+    {
+        $this->application->loadMissing('destination.server');
+
+        $server = $this->application->destination?->server;
+        if (! $server) {
+            return null;
+        }
+
+        return generateUrl($server, $this->application->uuid);
+    }
+
+    /**
+     * @return array{supported: bool, reason: string, expected_url: string|null}
+     */
+    #[Computed]
+    public function deploymentOperatorSupport(): array
+    {
+        $this->application->loadMissing('settings', 'destination.server');
+
+        $buildPack = (string) $this->application->build_pack;
+
+        if ($buildPack === BuildPackTypes::DOCKERCOMPOSE->value) {
+            return ['supported' => false, 'reason' => 'Docker Compose apps are not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+        }
+
+        if ($buildPack === BuildPackTypes::RAILPACK->value) {
+            return ['supported' => false, 'reason' => 'Railpack apps are not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+        }
+
+        if ($buildPack === BuildPackTypes::STATIC->value) {
+            return ['supported' => false, 'reason' => 'Standalone static apps are not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+        }
+
+        if (! in_array($buildPack, [BuildPackTypes::NIXPACKS->value, BuildPackTypes::DOCKERFILE->value], true)) {
+            return ['supported' => false, 'reason' => 'This deployment mode is not supported for operator mode.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+        }
+
+        if ($this->application->additional_servers()->count() > 0) {
+            return ['supported' => false, 'reason' => 'Apps with additional destinations are not supported for operator mode yet.', 'expected_url' => $this->deploymentOperatorExpectedUrl];
+        }
+
+        $expectedUrl = $this->deploymentOperatorExpectedUrl;
+        if (blank($expectedUrl)) {
+            return ['supported' => false, 'reason' => 'No generated Coolify URL is available for this app.', 'expected_url' => null];
+        }
+
+        $configuredDomains = collect($this->application->fqdns)
+            ->map(fn (string $fqdn): string => trim($fqdn))
+            ->filter();
+
+        $normalizedConfiguredDomains = $configuredDomains
+            ->map(fn (string $fqdn): string => $this->normalizeRouteUrl($fqdn))
+            ->unique()
+            ->values();
+
+        $normalizedExpectedUrl = $this->normalizeRouteUrl($expectedUrl);
+
+        if (! $normalizedConfiguredDomains->contains($normalizedExpectedUrl)) {
+            return [
+                'supported' => false,
+                'reason' => 'Add the generated Coolify URL to Domains to enable operator mode verification.',
+                'expected_url' => $expectedUrl,
+            ];
+        }
+
+        if ($buildPack === BuildPackTypes::NIXPACKS->value) {
+            if ($this->application->settings->is_static && blank($this->application->publish_directory)) {
+                return [
+                    'supported' => false,
+                    'reason' => 'Static Nixpacks apps need a publish directory to be set.',
+                    'expected_url' => $expectedUrl,
+                ];
+            }
+
+            return ['supported' => true, 'reason' => 'supported', 'expected_url' => $expectedUrl];
+        }
+
+        if ($buildPack === BuildPackTypes::DOCKERFILE->value) {
+            if ($this->application->settings->is_static) {
+                return [
+                    'supported' => false,
+                    'reason' => 'Static Dockerfile apps are not supported for operator mode.',
+                    'expected_url' => $expectedUrl,
+                ];
+            }
+
+            if (filled($this->application->dockerfile)) {
+                return [
+                    'supported' => false,
+                    'reason' => 'Inline Dockerfile is not supported for operator mode. Use a Dockerfile in your repository.',
+                    'expected_url' => $expectedUrl,
+                ];
+            }
+
+            return ['supported' => true, 'reason' => 'supported', 'expected_url' => $expectedUrl];
+        }
+
+        return ['supported' => false, 'reason' => 'This app is not supported for operator mode.', 'expected_url' => $expectedUrl];
+    }
+
+    private function normalizeRouteUrl(string $url): string
+    {
+        try {
+            $parsedUrl = Url::fromString($url);
+            $path = $parsedUrl->getPath();
+
+            return $parsedUrl
+                ->withPort(null)
+                ->withPath($path === '/' ? '' : rtrim($path, '/'))
+                ->__toString();
+        } catch (\Throwable) {
+            return trim($url);
+        }
     }
 
     private function resetDefaultLabels()

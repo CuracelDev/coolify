@@ -74,7 +74,7 @@ describe('deployment advisor service', function () {
             ->and(data_get($result, 'recommendation.port'))->toBe(3000);
     });
 
-    test('detects vite static style repositories heuristically', function () {
+    test('detects vite repositories as nixpacks-backed static builds heuristically', function () {
         $inspection = deploymentAdvisorInspectionPayload([
             'selected_files' => [
                 [
@@ -98,11 +98,60 @@ describe('deployment advisor service', function () {
 
         $result = app(DeploymentAdvisorService::class)->recommend($inspection);
 
-        expect(data_get($result, 'recommendation.build_pack'))->toBe('static')
+        expect(data_get($result, 'recommendation.build_pack'))->toBe('nixpacks')
             ->and(data_get($result, 'recommendation.install_command'))->toBe('pnpm install --frozen-lockfile')
             ->and(data_get($result, 'recommendation.build_command'))->toBe('pnpm build')
             ->and(data_get($result, 'recommendation.publish_directory'))->toBe('/dist')
+            ->and(data_get($result, 'recommendation.is_static'))->toBeTrue()
+            ->and(data_get($result, 'recommendation.confidence'))->toBe(0.7)
             ->and(data_get($result, 'recommendation.port'))->toBe(80);
+    });
+
+    test('vite heuristics stay overridable by ai', function () {
+        config()->set('services.ai_deploy_advisor.api_key', 'test-token');
+
+        Http::fake([
+            'https://llm.crl.to/v1/chat/completions' => Http::response([
+                'choices' => [[
+                    'message' => [
+                        'content' => json_encode([
+                            'build_pack' => 'railpack',
+                            'start_command' => 'node server.js',
+                            'port' => 4173,
+                            'confidence' => 0.88,
+                            'rationale' => 'SSR entrypoint detected.',
+                        ]),
+                    ],
+                ]],
+            ]),
+        ]);
+
+        $inspection = deploymentAdvisorInspectionPayload([
+            'selected_files' => [
+                [
+                    'name' => 'vite.config.ts',
+                    'path' => '/vite.config.ts',
+                    'content' => 'import { defineConfig } from "vite";',
+                ],
+            ],
+            'package_json' => [
+                'scripts' => [
+                    'build' => 'vite build',
+                ],
+                'dependencies' => ['react' => '^19.0.0'],
+                'dev_dependencies' => ['vite' => '^6.0.0'],
+            ],
+        ]);
+
+        $result = app(DeploymentAdvisorService::class)->recommend($inspection);
+
+        expect(data_get($result, 'heuristics.build_pack'))->toBe('nixpacks')
+            ->and(data_get($result, 'heuristics.is_static'))->toBeTrue()
+            ->and(data_get($result, 'heuristics.confidence'))->toBe(0.7)
+            ->and(data_get($result, 'recommendation.build_pack'))->toBe('railpack')
+            ->and(data_get($result, 'recommendation.start_command'))->toBe('node server.js')
+            ->and(data_get($result, 'recommendation.port'))->toBe(4173)
+            ->and(data_get($result, 'recommendation.source'))->toBe('ai_override');
     });
 
     test('ai recommendation can be faked and unsafe output is normalized away', function () {

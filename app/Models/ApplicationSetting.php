@@ -9,6 +9,7 @@ class ApplicationSetting extends Model
 {
     protected $casts = [
         'is_static' => 'boolean',
+        'is_deployment_operator_enabled' => 'boolean',
         'is_spa' => 'boolean',
         'is_build_server_enabled' => 'boolean',
         'is_preserve_repository_enabled' => 'boolean',
@@ -26,12 +27,14 @@ class ApplicationSetting extends Model
         'is_git_lfs_enabled' => 'boolean',
         'is_git_shallow_clone_enabled' => 'boolean',
         'docker_images_to_keep' => 'integer',
+        'deployment_operator_max_attempts' => 'integer',
         'stop_grace_period' => 'integer',
     ];
 
     protected $fillable = [
         'application_id',
         'is_static',
+        'is_deployment_operator_enabled',
         'is_git_submodules_enabled',
         'is_git_lfs_enabled',
         'is_auto_deploy_enabled',
@@ -65,6 +68,7 @@ class ApplicationSetting extends Model
         'inject_build_args_to_dockerfile',
         'include_source_commit_in_build',
         'docker_images_to_keep',
+        'deployment_operator_max_attempts',
         'stop_grace_period',
     ];
 
