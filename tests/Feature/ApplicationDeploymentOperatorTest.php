@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Schema;
+use Mockery\MockInterface;
 use Visus\Cuid2\Cuid2;
 
 uses(RefreshDatabase::class);
@@ -497,6 +498,79 @@ describe('application deployment verification job', function () {
             ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.attempts'))->toBe(1);
     });
 
+    test('safe owned custom domain drift triggers internal reconcile and records success metadata without mutating app config', function () {
+        $application = makeOperatorApplication([
+            'fqdn' => generateUrl(test()->server, (string) new Cuid2).',https://app.example.com',
+        ]);
+        $application->forceFill([
+            'fqdn' => generateUrl(test()->server, $application->uuid).',https://app.example.com',
+        ])->save();
+        $application->refresh();
+        $deployment = makeDeployment($application, status: 'finished');
+        $fqdnBefore = $application->fqdn;
+        $customLabelsBefore = $application->custom_labels;
+        $envCountBefore = $application->environment_variables()->count();
+
+        $customAttempts = 0;
+        Http::fake(function ($request) use ($application, &$customAttempts) {
+            if ($request->url() === generateUrl(test()->server, $application->uuid)) {
+                return Http::response('', 200);
+            }
+
+            if ($request->url() === 'https://app.example.com') {
+                $customAttempts++;
+
+                return $customAttempts === 1
+                    ? Http::response('', 503)
+                    : Http::response('', 200);
+            }
+
+            return Http::response('', 404);
+        });
+
+        /** @var ApplicationDeploymentOperatorService&MockInterface $service */
+        $service = Mockery::mock(ApplicationDeploymentOperatorService::class)->makePartial()->shouldAllowMockingProtectedMethods();
+        $service->shouldReceive('performInternalCustomDomainReconcile')->once()->andReturn([
+            'attempted' => true,
+            'actions' => ['ensure_proxy_networks_exist', 'connect_proxy_to_networks', 'regenerate_proxy_dynamic_config'],
+            'reason' => 'internal_proxy_reconciled',
+        ]);
+
+        $job = new ApplicationDeploymentVerificationJob($deployment->id);
+        $job->handle($service);
+
+        $deployment->refresh();
+        $application->refresh();
+
+        expect($deployment->operator_status)->toBe('recorded')
+            ->and(data_get($deployment->operator_verification, 'pass'))->toBeTrue()
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.internal_reconcile_attempted'))->toBe(1)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.internal_reconcile_succeeded'))->toBe(1)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.result'))->toBe('passed')
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.attempts'))->toBe(2)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.attempted'))->toBeTrue()
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.actions'))->toBe([
+                'ensure_proxy_networks_exist',
+                'connect_proxy_to_networks',
+                'regenerate_proxy_dynamic_config',
+            ])
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.pre_result'))->toBe([
+                'result' => 'pending',
+                'http_status' => 503,
+                'reason' => 'proxy_warmup',
+            ])
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.post_result'))->toBe([
+                'result' => 'passed',
+                'http_status' => 200,
+                'reason' => 'http_ok',
+            ])
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.succeeded'))->toBeTrue()
+            ->and($application->fqdn)->toBe($fqdnBefore)
+            ->and($application->custom_labels)->toBe($customLabelsBefore)
+            ->and($application->environment_variables()->count())->toBe($envCountBefore)
+            ->and($customAttempts)->toBe(2);
+    });
+
     test('transient custom domain exception then success records final passed', function () {
         $application = makeOperatorApplication([
             'fqdn' => generateUrl(test()->server, (string) new Cuid2).',https://app.example.com',
@@ -537,7 +611,7 @@ describe('application deployment verification job', function () {
             ->and($customAttempts)->toBe(2);
     });
 
-    test('default route pass plus custom domain pending is recorded as pending without overriding success', function () {
+    test('default route pass plus custom domain still pending after safe internal reconcile remains observe only', function () {
         $application = makeOperatorApplication([
             'fqdn' => generateUrl(test()->server, (string) new Cuid2).',https://app.example.com',
         ]);
@@ -547,22 +621,81 @@ describe('application deployment verification job', function () {
         $application->refresh();
         $deployment = makeDeployment($application, status: 'finished');
 
-        Http::fake([
-            generateUrl(test()->server, $application->uuid) => Http::response('', 200),
-            'https://app.example.com' => Http::response('', 503),
+        $customAttempts = 0;
+        Http::fake(function ($request) use ($application, &$customAttempts) {
+            if ($request->url() === generateUrl(test()->server, $application->uuid)) {
+                return Http::response('', 200);
+            }
+
+            if ($request->url() === 'https://app.example.com') {
+                $customAttempts++;
+
+                return Http::response('', 503);
+            }
+
+            return Http::response('', 404);
+        });
+
+        /** @var ApplicationDeploymentOperatorService&MockInterface $service */
+        $service = Mockery::mock(ApplicationDeploymentOperatorService::class)->makePartial()->shouldAllowMockingProtectedMethods();
+        $service->shouldReceive('performInternalCustomDomainReconcile')->once()->andReturn([
+            'attempted' => true,
+            'actions' => ['ensure_proxy_networks_exist', 'connect_proxy_to_networks', 'regenerate_proxy_dynamic_config'],
+            'reason' => 'internal_proxy_reconciled',
         ]);
 
         $job = new ApplicationDeploymentVerificationJob($deployment->id);
-        $job->handle(app(ApplicationDeploymentOperatorService::class));
+        $job->handle($service);
 
         $deployment->refresh();
 
         expect($deployment->operator_status)->toBe('recorded')
             ->and(data_get($deployment->operator_verification, 'pass'))->toBeTrue()
             ->and(data_get($deployment->operator_verification, 'custom_domains.summary.pending'))->toBe(1)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.internal_reconcile_attempted'))->toBe(1)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.internal_reconcile_succeeded'))->toBe(0)
             ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.result'))->toBe('pending')
             ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.reason'))->toBe('proxy_warmup')
-            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.attempts'))->toBe(3);
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.attempts'))->toBe(2)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.attempted'))->toBeTrue()
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.pre_result.http_status'))->toBe(503)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.post_result.http_status'))->toBe(503)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.succeeded'))->toBeFalse()
+            ->and($customAttempts)->toBe(2);
+    });
+
+    test('ambiguous custom domain bundle stays observe only without internal reconcile', function () {
+        $application = makeOperatorApplication([
+            'fqdn' => generateUrl(test()->server, (string) new Cuid2).',https://app.example.com,https://alt.example.com',
+        ]);
+        $application->forceFill([
+            'fqdn' => generateUrl(test()->server, $application->uuid).',https://app.example.com,https://alt.example.com',
+        ])->save();
+        $application->refresh();
+        $deployment = makeDeployment($application, status: 'finished');
+
+        Http::fake([
+            generateUrl(test()->server, $application->uuid) => Http::response('', 200),
+            'https://app.example.com' => Http::response('', 503),
+            'https://alt.example.com' => Http::response('', 503),
+        ]);
+
+        /** @var ApplicationDeploymentOperatorService&MockInterface $service */
+        $service = Mockery::mock(ApplicationDeploymentOperatorService::class)->makePartial()->shouldAllowMockingProtectedMethods();
+        $service->shouldNotReceive('performInternalCustomDomainReconcile');
+
+        $job = new ApplicationDeploymentVerificationJob($deployment->id);
+        $job->handle($service);
+
+        $deployment->refresh();
+
+        expect($deployment->operator_status)->toBe('recorded')
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.total'))->toBe(2)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.internal_reconcile_attempted'))->toBe(0)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.attempted'))->toBeFalse()
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.reason'))->toBe('custom_domain_bundle_ambiguous')
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.attempts'))->toBe(3)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.1.internal_reconcile.reason'))->toBe('custom_domain_bundle_ambiguous');
     });
 
     test('repeated transient custom domain failures stay pending', function () {
@@ -629,6 +762,40 @@ describe('application deployment verification job', function () {
             ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.result'))->toBe('failed')
             ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.reason'))->toBe('redirect_host_mismatch')
             ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.attempts'))->toBe(1);
+    });
+
+    test('provider style custom domain failures remain observe only without internal reconcile', function () {
+        $application = makeOperatorApplication([
+            'fqdn' => generateUrl(test()->server, (string) new Cuid2).',https://app.example.com',
+        ]);
+        $application->forceFill([
+            'fqdn' => generateUrl(test()->server, $application->uuid).',https://app.example.com',
+        ])->save();
+        $application->refresh();
+        $deployment = makeDeployment($application, status: 'finished');
+
+        Http::fake([
+            generateUrl(test()->server, $application->uuid) => Http::response('', 200),
+            'https://app.example.com' => Http::response('', 523),
+        ]);
+
+        /** @var ApplicationDeploymentOperatorService&MockInterface $service */
+        $service = Mockery::mock(ApplicationDeploymentOperatorService::class)->makePartial()->shouldAllowMockingProtectedMethods();
+        $service->shouldNotReceive('performInternalCustomDomainReconcile');
+
+        $job = new ApplicationDeploymentVerificationJob($deployment->id);
+        $job->handle($service);
+
+        $deployment->refresh();
+
+        expect($deployment->operator_status)->toBe('recorded')
+            ->and(data_get($deployment->operator_verification, 'pass'))->toBeTrue()
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.pending'))->toBe(1)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.summary.internal_reconcile_attempted'))->toBe(0)
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.result'))->toBe('pending')
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.reason'))->toBe('proxy_warmup')
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.attempted'))->toBeFalse()
+            ->and(data_get($deployment->operator_verification, 'custom_domains.domains.0.internal_reconcile.reason'))->toBe('provider_edge_failure');
     });
 
     test('finished deployment with failed verification does not get recorded as success', function () {
@@ -811,8 +978,12 @@ describe('application deployment verification job', function () {
             'https://app.example.com' => Http::response('', 200),
         ]);
 
+        /** @var ApplicationDeploymentOperatorService&MockInterface $service */
+        $service = Mockery::mock(ApplicationDeploymentOperatorService::class)->makePartial()->shouldAllowMockingProtectedMethods();
+        $service->shouldNotReceive('performInternalCustomDomainReconcile');
+
         $job = new ApplicationDeploymentVerificationJob($deployment->id);
-        $job->handle(app(ApplicationDeploymentOperatorService::class));
+        $job->handle($service);
 
         $deployment->refresh();
 

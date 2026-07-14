@@ -8,6 +8,7 @@ use App\Models\Application;
 use App\Models\ApplicationDeploymentQueue;
 use App\Models\ApplicationPreview;
 use App\Models\EnvironmentVariable;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
 use Spatie\Url\Url;
 use Symfony\Component\Yaml\Yaml;
@@ -19,6 +20,10 @@ class ApplicationDeploymentOperatorService
     private const MAX_TOTAL_ATTEMPTS = 2;
 
     private const CUSTOM_DOMAIN_MAX_ATTEMPTS = 3;
+
+    private const INTERNAL_CUSTOM_DOMAIN_RECONCILE_HTTP_STATUSES = [502, 503, 504];
+
+    private const PROVIDER_EDGE_CUSTOM_DOMAIN_HTTP_STATUSES = [522, 523, 524, 525, 526];
 
     /**
      * @return array<string, mixed>
@@ -1645,7 +1650,7 @@ class ApplicationDeploymentOperatorService
 
         if (! $application || ! $server) {
             return [
-                'summary' => ['total' => 0, 'passed' => 0, 'pending' => 0, 'failed' => 0],
+                'summary' => ['total' => 0, 'passed' => 0, 'pending' => 0, 'failed' => 0, 'internal_reconcile_attempted' => 0, 'internal_reconcile_succeeded' => 0],
                 'domains' => [],
             ];
         }
@@ -1657,8 +1662,10 @@ class ApplicationDeploymentOperatorService
             ->unique()
             ->values();
 
+        $reconcileContext = $this->customDomainInternalReconcileContext($deployment, $domains);
+
         $results = $domains
-            ->map(fn (string $domain): array => $this->probeCustomDomain($domain, $server))
+            ->map(fn (string $domain): array => $this->observeCustomDomain($deployment, $domain, $server, $reconcileContext))
             ->all();
 
         return [
@@ -1667,6 +1674,8 @@ class ApplicationDeploymentOperatorService
                 'passed' => count(array_filter($results, fn (array $result): bool => $result['result'] === 'passed')),
                 'pending' => count(array_filter($results, fn (array $result): bool => $result['result'] === 'pending')),
                 'failed' => count(array_filter($results, fn (array $result): bool => $result['result'] === 'failed')),
+                'internal_reconcile_attempted' => count(array_filter($results, fn (array $result): bool => (bool) data_get($result, 'internal_reconcile.attempted', false))),
+                'internal_reconcile_succeeded' => count(array_filter($results, fn (array $result): bool => (bool) data_get($result, 'internal_reconcile.succeeded', false))),
             ],
             'domains' => $results,
         ];
@@ -1675,11 +1684,41 @@ class ApplicationDeploymentOperatorService
     /**
      * @return array{domain: string, result: string, http_status: int|null, reason: string}
      */
-    private function probeCustomDomain(string $domain, object $server): array
+    private function observeCustomDomain(ApplicationDeploymentQueue $deployment, string $domain, object $server, array $reconcileContext): array
     {
-        $lastResult = null;
+        $preResult = $this->probeCustomDomainOnce($domain, $server);
+        $preResult['attempts'] = 1;
+        $decision = $this->customDomainInternalReconcileDecision($reconcileContext, $domain, $preResult);
 
-        for ($attempt = 1; $attempt <= self::CUSTOM_DOMAIN_MAX_ATTEMPTS; $attempt++) {
+        if ($decision['attempt']) {
+            $reconcile = $this->performInternalCustomDomainReconcile($deployment);
+            $postResult = $this->probeCustomDomainOnce($domain, $server);
+            $postResult['attempts'] = 2;
+
+            return $this->withCustomDomainReconcileMetadata($postResult, $reconcile, $preResult, $postResult);
+        }
+
+        $result = $this->completeCustomDomainObservation($domain, $server, $preResult);
+
+        return $this->withCustomDomainReconcileMetadata($result, [
+            'attempted' => false,
+            'actions' => [],
+            'reason' => $decision['reason'],
+        ], $preResult);
+    }
+
+    /**
+     * @return array{domain: string, result: string, http_status: int|null, reason: string}
+     */
+    private function completeCustomDomainObservation(string $domain, object $server, array $firstResult): array
+    {
+        $lastResult = $firstResult;
+
+        if (! $this->shouldRetryCustomDomainResult($firstResult)) {
+            return $firstResult;
+        }
+
+        for ($attempt = 2; $attempt <= self::CUSTOM_DOMAIN_MAX_ATTEMPTS; $attempt++) {
             $result = $this->probeCustomDomainOnce($domain, $server);
             $result['attempts'] = $attempt;
             $lastResult = $result;
@@ -1689,13 +1728,7 @@ class ApplicationDeploymentOperatorService
             }
         }
 
-        return $lastResult ?? [
-            'domain' => $domain,
-            'result' => 'pending',
-            'http_status' => null,
-            'reason' => 'request_exception',
-            'attempts' => self::CUSTOM_DOMAIN_MAX_ATTEMPTS,
-        ];
+        return $lastResult;
     }
 
     /**
@@ -1783,6 +1816,241 @@ class ApplicationDeploymentOperatorService
     {
         return ($result['result'] ?? null) === 'pending'
             && in_array($result['reason'] ?? null, ['request_exception', 'proxy_warmup', 'dns_not_propagated'], true);
+    }
+
+    /**
+     * @param  Collection<int, string>  $domains
+     * @return array{eligible: bool, reason: string, domain: string|null}
+     */
+    private function customDomainInternalReconcileContext(ApplicationDeploymentQueue $deployment, Collection $domains): array
+    {
+        $application = $deployment->application;
+
+        if (! $application || ! $deployment->server) {
+            return ['eligible' => false, 'reason' => 'missing_application_or_server', 'domain' => null];
+        }
+
+        if ($deployment->pull_request_id !== 0) {
+            return ['eligible' => false, 'reason' => 'preview_deployment', 'domain' => null];
+        }
+
+        if ($deployment->only_this_server || $application->additional_servers()->count() > 0) {
+            return ['eligible' => false, 'reason' => 'multi_destination_complexity', 'domain' => null];
+        }
+
+        if ((bool) data_get($application, 'settings.connect_to_docker_network', data_get($application, 'connect_to_docker_network', false))) {
+            return ['eligible' => false, 'reason' => 'connect_to_docker_network_enabled', 'domain' => null];
+        }
+
+        $support = $this->singleDestinationVerifyOnlySupport($deployment);
+        if (! $support['eligible']) {
+            return ['eligible' => false, 'reason' => $support['reason'], 'domain' => null];
+        }
+
+        if ($domains->count() !== 1) {
+            return ['eligible' => false, 'reason' => 'custom_domain_bundle_ambiguous', 'domain' => null];
+        }
+
+        $validatedDomain = $this->validateOwnedCustomDomainTarget((string) $domains->first());
+        if (! $validatedDomain['valid']) {
+            return ['eligible' => false, 'reason' => $validatedDomain['reason'], 'domain' => null];
+        }
+
+        if (! $this->hasCoolifyManagedCustomDomainRouting($application)) {
+            return ['eligible' => false, 'reason' => 'application_routing_not_coolify_managed', 'domain' => null];
+        }
+
+        return ['eligible' => true, 'reason' => 'eligible_internal_proxy_reconcile', 'domain' => $validatedDomain['target']];
+    }
+
+    /**
+     * @return array{attempt: bool, reason: string}
+     */
+    private function customDomainInternalReconcileDecision(array $context, string $domain, array $result): array
+    {
+        if (! ($context['eligible'] ?? false)) {
+            return ['attempt' => false, 'reason' => (string) ($context['reason'] ?? 'custom_domain_reconcile_not_eligible')];
+        }
+
+        if (($context['domain'] ?? null) !== $domain) {
+            return ['attempt' => false, 'reason' => 'domain_not_selected'];
+        }
+
+        if (($result['result'] ?? null) === 'passed') {
+            return ['attempt' => false, 'reason' => 'custom_domain_passed'];
+        }
+
+        if (($result['reason'] ?? null) === 'dns_not_propagated') {
+            return ['attempt' => false, 'reason' => 'dns_validation_not_ready'];
+        }
+
+        $status = $result['http_status'] ?? null;
+        if (($result['reason'] ?? null) === 'proxy_warmup' && in_array($status, self::INTERNAL_CUSTOM_DOMAIN_RECONCILE_HTTP_STATUSES, true)) {
+            return ['attempt' => true, 'reason' => 'owned_internal_proxy_drift'];
+        }
+
+        if (($result['reason'] ?? null) === 'proxy_warmup' && in_array($status, self::PROVIDER_EDGE_CUSTOM_DOMAIN_HTTP_STATUSES, true)) {
+            return ['attempt' => false, 'reason' => 'provider_edge_failure'];
+        }
+
+        return ['attempt' => false, 'reason' => 'failure_signature_not_safe'];
+    }
+
+    /**
+     * @return array{valid: bool, reason: string, target: string|null}
+     */
+    private function validateOwnedCustomDomainTarget(string $target): array
+    {
+        $validatedTarget = $this->validateComposeVerificationTarget($target);
+        if (! $validatedTarget['valid']) {
+            return $validatedTarget;
+        }
+
+        $host = Url::fromString((string) $validatedTarget['target'])->getHost();
+        if (str($host)->startsWith('*.')) {
+            return [
+                'valid' => false,
+                'reason' => 'wildcard_custom_domain_not_supported',
+                'target' => null,
+            ];
+        }
+
+        return $validatedTarget;
+    }
+
+    private function hasCoolifyManagedCustomDomainRouting(Application $application): bool
+    {
+        $existingLabels = $this->normalizedApplicationCustomLabels($application);
+        if ($existingLabels->isEmpty()) {
+            return true;
+        }
+
+        return $existingLabels->values()->all() === $this->generatedApplicationCustomLabels($application)->values()->all();
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function normalizedApplicationCustomLabels(Application $application): Collection
+    {
+        $labels = (string) ($application->custom_labels ?? '');
+        if ($labels === '') {
+            return collect();
+        }
+
+        $decoded = base64_decode($labels, true);
+        if ($decoded !== false && base64_encode($decoded) === $labels) {
+            $labels = $decoded;
+        }
+
+        return collect(preg_split("/\r\n|\n|\r/", $labels) ?: [])
+            ->map(fn ($label): string => trim((string) $label))
+            ->filter()
+            ->sort()
+            ->values();
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function generatedApplicationCustomLabels(Application $application): Collection
+    {
+        return collect(generateLabelsApplication($application))
+            ->map(fn ($label): string => trim((string) $label))
+            ->filter()
+            ->sort()
+            ->values();
+    }
+
+    /**
+     * @return array{attempted: bool, actions: array<int, string>, reason: string, error?: string|null}
+     */
+    protected function performInternalCustomDomainReconcile(ApplicationDeploymentQueue $deployment): array
+    {
+        $server = $deployment->server;
+        if (! $server) {
+            return [
+                'attempted' => false,
+                'actions' => [],
+                'reason' => 'missing_server',
+            ];
+        }
+
+        $actions = [];
+
+        try {
+            $commands = [];
+
+            $ensureNetworkCommands = ensureProxyNetworksExist($server);
+            if ($ensureNetworkCommands->isNotEmpty()) {
+                $commands = array_merge($commands, $ensureNetworkCommands->toArray());
+                $actions[] = 'ensure_proxy_networks_exist';
+            }
+
+            $connectNetworkCommands = connectProxyToNetworks($server);
+            if ($connectNetworkCommands->isNotEmpty()) {
+                $commands = array_merge($commands, $connectNetworkCommands->toArray());
+                $actions[] = 'connect_proxy_to_networks';
+            }
+
+            if ($commands !== []) {
+                instant_remote_process($commands, $server, false);
+            }
+
+            $server->setupDynamicProxyConfiguration();
+            $actions[] = 'regenerate_proxy_dynamic_config';
+
+            if ($server->proxyType() === 'CADDY') {
+                $actions[] = 'hot_reload_proxy';
+            }
+
+            return [
+                'attempted' => true,
+                'actions' => array_values(array_unique($actions)),
+                'reason' => 'internal_proxy_reconciled',
+            ];
+        } catch (Throwable $exception) {
+            return [
+                'attempted' => true,
+                'actions' => array_values(array_unique($actions)),
+                'reason' => 'internal_proxy_reconcile_error',
+                'error' => $exception->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * @param  array{attempted: bool, actions: array<int, string>, reason: string, error?: string|null}  $reconcile
+     * @return array<string, mixed>
+     */
+    private function withCustomDomainReconcileMetadata(array $result, array $reconcile, array $preResult, ?array $postResult = null): array
+    {
+        $result['internal_reconcile'] = [
+            'attempted' => (bool) ($reconcile['attempted'] ?? false),
+            'actions' => array_values(array_unique($reconcile['actions'] ?? [])),
+            'reason' => $reconcile['reason'] ?? 'not_attempted',
+            'pre_result' => $this->customDomainResultSnapshot($preResult),
+            'post_result' => $postResult ? $this->customDomainResultSnapshot($postResult) : null,
+            'succeeded' => (bool) ($reconcile['attempted'] ?? false) && (($postResult['result'] ?? null) === 'passed'),
+        ];
+
+        if (array_key_exists('error', $reconcile)) {
+            $result['internal_reconcile']['error'] = $reconcile['error'];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return array{result: string|null, http_status: int|null, reason: string|null}
+     */
+    private function customDomainResultSnapshot(array $result): array
+    {
+        return [
+            'result' => $result['result'] ?? null,
+            'http_status' => $result['http_status'] ?? null,
+            'reason' => $result['reason'] ?? null,
+        ];
     }
 
     private function deploymentLogText(ApplicationDeploymentQueue $deployment): string
